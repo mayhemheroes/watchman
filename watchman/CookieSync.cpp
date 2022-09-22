@@ -49,7 +49,7 @@ void CookieSync::removeCookieDir(const w_string& dir) {
   // serviced.
   auto cookies = cookies_.wlock();
   for (const auto& [cookiePath, cookie] : *cookies) {
-    if (w_string_startswith(cookiePath, dir)) {
+    if (cookiePath.piece().startsWith(dir)) {
       cookie->notify();
       cookies->erase(cookiePath);
     }
@@ -64,7 +64,8 @@ void CookieSync::setCookieDir(const w_string& dir) {
 
 std::vector<w_string> CookieSync::getOutstandingCookieFileList() const {
   std::vector<w_string> result;
-  for (auto& it : *cookies_.rlock()) {
+  auto cookiesLocked = cookies_.rlock();
+  for (auto& it : *cookiesLocked) {
     result.push_back(it.first);
   }
 

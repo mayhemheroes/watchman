@@ -387,6 +387,9 @@ struct GetAttributesFromFilesParams {
 struct GetAttributesFromFilesResult {
   1: list<FileAttributeDataOrError> res;
 }
+struct GetAttributesFromFilesResultV2 {
+  1: list<FileAttributeDataOrErrorV2> res;
+}
 
 struct ReaddirParams {
   1: PathString mountPoint;
@@ -1266,14 +1269,25 @@ enum ObjectType {
   SYMLINK = 3,
 }
 
+struct SetPathObjectIdObject {
+  1: PathString path;
+  2: ThriftObjectId objectId;
+  3: ObjectType type;
+}
+
+// Any new use case should try to avoid using path, objectId and type, they will be deprecated.
+// Please use objects instead which would batch requests. If both path/objectId/type and objects
+// both present, the singlular will be added to the objects.
 struct SetPathObjectIdParams {
   1: PathString mountPoint;
+  // TODO: deprecate path, objectId and type
   2: PathString path;
   3: ThriftObjectId objectId;
   4: ObjectType type;
   5: CheckoutMode mode;
   // Extra request infomation. i.e. build uuid, cache session id.
   6: optional map<string, string> requestInfo;
+  7: list<SetPathObjectIdObject> objects;
 }
 
 struct SetPathObjectIdResult {
@@ -1541,9 +1555,28 @@ service EdenService extends fb303_core.BaseService {
   /**
    * Returns the requested file attributes for the provided list of files.
    * The result maps the files to attribute results which may be an EdenError
-   * or a FileAttributeData struct.
+   * or a FileAttributeDataV2 struct.
    *
-   * Currently, this API assumes all the given paths corespond to regular files.
+   * Unlike the getAttributesFromFiles endpoint, this does not assume that all
+   * the inputs are regular files. This endpoint will attempt to return
+   * attributes for any type of file (directory included). Note that some
+   * attributes are not currently supported, like sha1 and size for directories
+   * and symlinks. At some point EdenFS may be able to support such attributes.
+   *
+   * Note: may return stale data if synchronizeWorkingCopy isn't called, and if
+   * the SyncBehavior specifies a 0 timeout. See the documentation for both of
+   * these for more details.
+   */
+  GetAttributesFromFilesResultV2 getAttributesFromFilesV2(
+    1: GetAttributesFromFilesParams params,
+  ) throws (1: EdenError ex);
+
+  /**
+   * DEPRECATED - prefer getAttributesFromFilesV2.
+   *
+   * Returns the requested file attributes for the provided list of files.
+   *
+   * This API assumes all the given paths corespond to regular files.
    * We return EdenErrors instead of attributes for paths that correspond to
    * directories or symlinks.
    *

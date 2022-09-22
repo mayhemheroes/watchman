@@ -10,7 +10,6 @@
 #include <ostream>
 #include <stdexcept>
 #include "watchman/thirdparty/jansson/utf.h"
-#include "watchman/watchman_hash.h"
 #include "watchman/watchman_string.h"
 
 // Filename mapping and handling strategy
@@ -30,20 +29,22 @@
 #define SYMLINK_ESCAPE L"\\??\\"
 #define SYMLINK_ESCAPE_LEN 4
 
-static void w_string_addref(w_string_t* str);
-static void w_string_delref(w_string_t* str);
-static w_string_t*
+namespace watchman {
+struct StringHeader;
+}
+
+using namespace watchman;
+
+static void w_string_delref(StringHeader* str);
+static StringHeader*
 w_string_new_len_typed(const char* str, uint32_t len, w_string_type_t type);
 
 // string piece
 
-w_string_piece::w_string_piece() : s_(nullptr), e_(nullptr) {}
-w_string_piece::w_string_piece(std::nullptr_t) : s_(nullptr), e_(nullptr) {}
-
 w_string_piece::w_string_piece(w_string_piece&& other) noexcept
-    : s_(other.s_), e_(other.e_) {
-  other.s_ = nullptr;
-  other.e_ = nullptr;
+    : str_(other.str_), len_(other.len_) {
+  other.str_ = nullptr;
+  other.len_ = 0;
 }
 
 w_string w_string_piece::asWString(w_string_type_t stringType) const {
@@ -51,66 +52,55 @@ w_string w_string_piece::asWString(w_string_type_t stringType) const {
 }
 
 w_string w_string_piece::asLowerCase(w_string_type_t stringType) const {
-  char* buf;
-  w_string_t* s;
-
   /* need to make a lowercase version */
-  s = (w_string_t*)(new char[sizeof(*s) + size() + 1]);
-  new (s) w_string_t;
+  auto* s = StringHeader::alloc(size(), stringType);
+  char* buf = s->buf();
 
-  s->refcnt = 1;
-  s->len = size();
-  buf = const_cast<char*>(s->buf);
-  s->type = stringType;
-
-  auto cursor = s_;
-  while (cursor < e_) {
+  auto cursor = str_;
+  const char* const end = str_ + len_;
+  while (cursor < end) {
+    // TODO: `tolower` depends on locale.
     *buf = (char)tolower((uint8_t)*cursor);
     ++cursor;
     ++buf;
   }
   *buf = 0;
 
-  return w_string(s, false);
+  return w_string{s};
 }
 
-w_string w_string_piece::asLowerCaseSuffix(w_string_type_t stringType) const {
-  char* buf;
-  w_string_t* s;
-
+std::optional<w_string> w_string_piece::asLowerCaseSuffix(
+    w_string_type_t stringType) const {
   w_string_piece suffixPiece = this->suffix();
-  if (suffixPiece == nullptr) {
-    return nullptr;
+  if (suffixPiece.empty()) {
+    return std::nullopt;
   }
 
   /* need to make a lowercase version */
-  s = (w_string_t*)(new char[sizeof(*s) + suffixPiece.size() + 1]);
-  new (s) w_string_t;
+  auto* s = StringHeader::alloc(suffixPiece.size(), stringType);
+  char* buf = s->buf();
 
-  s->refcnt = 1;
-  s->len = suffixPiece.size();
-  buf = const_cast<char*>(s->buf);
-  s->type = stringType;
-
-  auto cursor = suffixPiece.s_;
-  while (cursor < suffixPiece.e_) {
+  auto cursor = suffixPiece.str_;
+  const char* const end = suffixPiece.str_ + suffixPiece.len_;
+  while (cursor < end) {
+    // TODO: `tolower` depends on locale.
     *buf = (char)tolower((uint8_t)*cursor);
     ++cursor;
     ++buf;
   }
   *buf = 0;
 
-  return w_string(s, false);
+  return w_string{s};
 }
 
 w_string w_string_piece::asUTF8Clean() const {
-  w_string s(s_, e_ - s_, W_STRING_UNICODE);
+  w_string s(str_, len_, W_STRING_UNICODE);
   utf8_fix_string(const_cast<char*>(s.data()), s.size());
   return s;
 }
 
 bool w_string_piece::pathIsAbsolute() const {
-  return w_is_path_absolute_cstr_len(data(), size());
+  return w_string_path_is_absolute(*this);
 }
 
 /** Compares two path strings.
@@ -159,42 +149,44 @@ bool w_string_piece::pathIsEqual(w_string_piece other) const {
 }
 
 w_string_piece w_string_piece::dirName() const {
-  if (e_ == s_) {
-    return nullptr;
+  if (len_ == 0) {
+    return {};
   }
-  for (auto end = e_ - 1; end >= s_; --end) {
+  const char* const e = str_ + len_;
+  for (auto end = e - 1; end >= str_; --end) {
     if (is_slash(*end)) {
       /* found the end of the parent dir */
 #ifdef _WIN32
-      if (end > s_ && end[-1] == ':') {
+      if (end > str_ && end[-1] == ':') {
         // Special case for "C:\"; we want to keep the
         // trailing slash for this case so that we continue
         // to consider it an absolute path
-        return w_string_piece(s_, 1 + end - s_);
+        return w_string_piece(str_, 1 + end - str_);
       }
 #endif
-      return w_string_piece(s_, end - s_);
+      return w_string_piece(str_, end - str_);
     }
   }
-  return nullptr;
+  return {};
 }
 
 w_string_piece w_string_piece::baseName() const {
-  if (e_ == s_) {
+  if (len_ == 0) {
     return *this;
   }
-  for (auto end = e_ - 1; end >= s_; --end) {
+  const char* const e = str_ + len_;
+  for (auto end = e - 1; end >= str_; --end) {
     if (is_slash(*end)) {
       /* found the end of the parent dir */
 #ifdef _WIN32
-      if (end == e_ && end > s_ && end[-1] == ':') {
+      if (end == e && end > str_ && end[-1] == ':') {
         // Special case for "C:\"; we want the baseName to
         // be this same component so that we continue
         // to consider it an absolute path
         return *this;
       }
 #endif
-      return w_string_piece(end + 1, e_ - (end + 1));
+      return w_string_piece(end + 1, e - (end + 1));
     }
   }
 
@@ -202,46 +194,19 @@ w_string_piece w_string_piece::baseName() const {
 }
 
 w_string_piece w_string_piece::suffix() const {
-  if (e_ == s_) {
-    return nullptr;
+  if (len_ == 0) {
+    return {};
   }
-  for (auto end = e_ - 1; end >= s_; --end) {
+  const char* const e = str_ + len_;
+  for (auto end = e - 1; end >= str_; --end) {
     if (is_slash(*end)) {
-      return nullptr;
+      return {};
     }
     if (*end == '.') {
-      return w_string_piece(end + 1, e_ - (end + 1));
+      return w_string_piece(end + 1, e - (end + 1));
     }
   }
-  return nullptr;
-}
-
-bool w_string_piece::operator<(w_string_piece other) const {
-  int res;
-  if (size() < other.size()) {
-    res = memcmp(data(), other.data(), size());
-    return (res == 0 ? -1 : res) < 0;
-  } else if (size() > other.size()) {
-    res = memcmp(data(), other.data(), other.size());
-    return (res == 0 ? +1 : res) < 0;
-  }
-  return memcmp(data(), other.data(), size()) < 0;
-}
-
-bool w_string_piece::operator==(w_string_piece other) const {
-  if (s_ == other.s_ && e_ == other.e_) {
-    return true;
-  }
-  if (size() != other.size()) {
-    return false;
-  } else if (size() == 0) {
-    return true;
-  }
-  return memcmp(data(), other.data(), size()) == 0;
-}
-
-bool w_string_piece::operator!=(w_string_piece other) const {
-  return !operator==(other);
+  return {};
 }
 
 bool w_string_piece::startsWith(w_string_piece prefix) const {
@@ -256,10 +221,12 @@ bool w_string_piece::startsWithCaseInsensitive(w_string_piece prefix) const {
     return false;
   }
 
-  auto me = s_;
-  auto pref = prefix.s_;
+  auto me = str_;
+  auto pref = prefix.str_;
 
-  while (pref < prefix.e_) {
+  const char* const end = prefix.str_ + prefix.len_;
+  while (pref < end) {
+    // TODO: `tolower` depends on locale.
     if (tolower((uint8_t)*me) != tolower((uint8_t)*pref)) {
       return false;
     }
@@ -271,23 +238,15 @@ bool w_string_piece::startsWithCaseInsensitive(w_string_piece prefix) const {
 
 // string
 
-w_string::w_string(std::nullptr_t) {}
-
 w_string::~w_string() {
   if (str_) {
     w_string_delref(str_);
   }
 }
 
-w_string::w_string(w_string_t* str, bool addRef) : str_(str) {
-  if (str_ && addRef) {
-    w_string_addref(str_);
-  }
-}
-
 w_string::w_string(const w_string& other) : str_(other.str_) {
   if (str_) {
-    w_string_addref(str_);
+    str_->addref();
   }
 }
 
@@ -325,13 +284,8 @@ w_string::w_string(const WCHAR* wpath, size_t pathlen) {
         GetLastError(), std::system_category(), "WideCharToMultiByte");
   }
 
-  str_ = (w_string_t*)(new char[sizeof(w_string_t) + len + 1]);
-  new (str_) w_string_t;
-
-  str_->refcnt = 1;
-  str_->len = len;
-  auto buf = const_cast<char*>(str_->buf);
-  str_->type = W_STRING_UNICODE;
+  str_ = StringHeader::alloc(len, W_STRING_UNICODE);
+  char* buf = str_->buf();
 
   res = WideCharToMultiByte(
       CP_UTF8, 0, wpath, pathlen, buf, len, nullptr, nullptr);
@@ -369,7 +323,7 @@ w_string& w_string::operator=(const w_string& other) {
   }
   str_ = other.str_;
   if (str_) {
-    w_string_addref(str_);
+    str_->addref();
   }
 
   return *this;
@@ -396,6 +350,28 @@ void w_string::reset() noexcept {
   }
 }
 
+inline uint32_t hash_string(const char* str, size_t len) {
+  // Watchman used to use Bob Jenkins's lookup3. Many good hash functions exist,
+  // but, empirically, the standard library's are faster than lookup3 and
+  // convenient.
+  size_t hash = std::hash<std::string_view>{}(std::string_view(str, len));
+  // Supporting 32-bit is easy: we can skip the mix.
+  static_assert(
+      sizeof(size_t) == sizeof(uint64_t), "32-bit platforms are not supported");
+
+  // We could use do fancy mixing like with twang_32from64 but a simple xor
+  // should be sufficient for hash tables.
+  return (hash >> 32) ^ hash;
+}
+
+StringHash w_string::computeAndStoreHash() const noexcept {
+  StringHash hash = hash_string(str_->buf(), str_->len);
+
+  str_->_hval.store(hash, std::memory_order_release);
+  str_->set_hval_computed();
+  return hash;
+}
+
 static inline uint32_t checked_len(size_t len) {
   if (len > UINT32_MAX) {
     throw std::range_error("string length exceeds UINT32_MAX");
@@ -404,14 +380,10 @@ static inline uint32_t checked_len(size_t len) {
 }
 
 w_string::w_string(const char* buf, size_t len, w_string_type_t stringType)
-    : w_string(
-          w_string_new_len_typed(buf, checked_len(len), stringType),
-          false) {}
+    : w_string{w_string_new_len_typed(buf, checked_len(len), stringType)} {}
 
 w_string::w_string(const char* buf, w_string_type_t stringType)
-    : w_string(
-          w_string_new_len_typed(buf, strlen_uint32(buf), stringType),
-          false) {}
+    : w_string{w_string_new_len_typed(buf, strlen_uint32(buf), stringType)} {}
 
 w_string w_string::dirName() const {
   return w_string_piece(*this).dirName().asWString();
@@ -421,14 +393,11 @@ w_string w_string::baseName() const {
   return w_string_piece(*this).baseName().asWString();
 }
 
-w_string w_string::asLowerCaseSuffix() const {
-  ensureNotNull();
-  return w_string_piece(*this).asLowerCaseSuffix();
+std::optional<w_string> w_string::asLowerCaseSuffix() const {
+  return piece().asLowerCaseSuffix();
 }
 
 w_string w_string::normalizeSeparators(char targetSeparator) const {
-  w_string_t* s;
-  char* buf;
   uint32_t i, len;
 
   len = str_->len;
@@ -437,30 +406,28 @@ w_string w_string::normalizeSeparators(char targetSeparator) const {
     return *this;
   }
 
+  char* thisbuf = str_->buf();
+
   // This doesn't do any special UNC or path len escape prefix handling
   // on windows.  We don't currently use it in a way that would require it.
 
   // Trim any trailing dir seps
   while (len > 0) {
-    if (str_->buf[len - 1] == '/' || str_->buf[len - 1] == '\\') {
+    if (thisbuf[len - 1] == '/' || thisbuf[len - 1] == '\\') {
       --len;
     } else {
       break;
     }
   }
 
-  s = (w_string_t*)(new char[sizeof(*s) + len + 1]);
-  new (s) w_string_t;
-
-  s->refcnt = 1;
-  s->len = len;
-  buf = const_cast<char*>(s->buf);
+  auto* s = StringHeader::alloc(len, W_STRING_BYTE);
+  char* buf = s->buf();
 
   for (i = 0; i < len; i++) {
-    if (str_->buf[i] == '/' || str_->buf[i] == '\\') {
+    if (thisbuf[i] == '/' || thisbuf[i] == '\\') {
       buf[i] = targetSeparator;
     } else {
-      buf[i] = str_->buf[i];
+      buf[i] = thisbuf[i];
     }
   }
   buf[len] = 0;
@@ -469,11 +436,25 @@ w_string w_string::normalizeSeparators(char targetSeparator) const {
 }
 
 bool w_string::operator<(const w_string& other) const {
-  return w_string_compare(str_, other.str_) < 0;
+  if (str_ == other.str_) {
+    // identity fast path
+    return false;
+  } else {
+    return view() < other.view();
+  }
 }
 
 bool w_string::operator==(const w_string& other) const {
-  return w_string_equal(str_, other.str_);
+  if (str_ == other.str_) {
+    // identity fast path
+    return true;
+  } else if (
+      str_->has_hval() && other.str_->has_hval() &&
+      str_->_hval != other.str_->_hval) {
+    return false;
+  } else {
+    return view() == other.view();
+  }
 }
 
 bool w_string::operator!=(const w_string& other) const {
@@ -482,25 +463,20 @@ bool w_string::operator!=(const w_string& other) const {
 
 w_string w_string::pathCat(std::initializer_list<w_string_piece> elems) {
   uint32_t length = 0;
-  w_string_t* s;
-  char* buf;
 
   for (auto& p : elems) {
     length += p.size() + 1;
   }
 
-  s = (w_string_t*)(new char[sizeof(*s) + length]);
-  new (s) w_string_t;
-
-  s->refcnt = 1;
-  buf = const_cast<char*>(s->buf);
+  auto* s = StringHeader::alloc(length, W_STRING_BYTE);
+  char* buf = s->buf();
 
   for (auto& p : elems) {
     if (p.size() == 0) {
       // Skip empty strings
       continue;
     }
-    if (buf != s->buf) {
+    if (buf != s->buf()) {
       *buf = '/';
       ++buf;
     }
@@ -508,19 +484,15 @@ w_string w_string::pathCat(std::initializer_list<w_string_piece> elems) {
     buf += p.size();
   }
   *buf = 0;
-  s->len = buf - s->buf;
+  // Post-hoc length adjustment.
+  // TODO: correctly calculate destination length up front.
+  s->len = buf - s->buf();
 
-  return w_string(s, false);
+  return w_string{s};
 }
 
-uint32_t w_string_compute_hval(w_string_t* str) {
-  str->_hval = w_hash_bytes(str->buf, str->len, 0);
-  str->hval_computed = 1;
-  return str->_hval;
-}
-
-uint32_t w_string_piece::hashValue() const {
-  return w_hash_bytes(data(), size(), 0);
+StringHash w_string_piece::hashValue() const noexcept {
+  return hash_string(data(), size());
 }
 
 uint32_t strlen_uint32(const char* str) {
@@ -535,7 +507,7 @@ uint32_t strlen_uint32(const char* str) {
 #ifdef _WIN32
 
 std::wstring w_string_piece::asWideUNC() const {
-  int len, res, i, prefix_len;
+  int len, res, prefix_len;
   bool use_escape = false;
   bool is_unc = false;
 
@@ -616,74 +588,24 @@ std::wstring w_string_piece::asWideUNC() const {
 
 #endif
 
-static w_string_t*
+static StringHeader*
 w_string_new_len_typed(const char* str, uint32_t len, w_string_type_t type) {
-  w_string_t* s;
-  char* buf;
-
-  s = (w_string_t*)(new char[sizeof(*s) + len + 1]);
-  new (s) w_string_t;
-
-  s->refcnt = 1;
-  s->len = len;
-  buf = const_cast<char*>(s->buf);
-  if (str) {
+  auto* s = StringHeader::alloc(len, type);
+  char* buf = s->buf();
+  if (len) {
     memcpy(buf, str, len);
   }
   buf[len] = 0;
-  s->type = type;
-
   return s;
 }
 
-void w_string_addref(w_string_t* str) {
-  ++str->refcnt;
-}
-
-void w_string_delref(w_string_t* str) {
-  if (--str->refcnt != 0) {
-    return;
+void w_string_delref(StringHeader* str) {
+  if (str->decref()) {
+    // Call the destructor.  We can't use regular delete because
+    // we allocated with malloc().
+    str->~StringHeader();
+    free(str);
   }
-  // Call the destructor.  We can't use regular delete because
-  // we allocated using operator new[], and we can't use delete[]
-  // directly either because the type doesn't match what we allocated.
-  str->~w_string_t();
-  // Release the raw memory.
-  delete[](char*) str;
-}
-
-int w_string_compare(const w_string_t* a, const w_string_t* b) {
-  int res;
-  if (a == b)
-    return 0;
-  if (a->len < b->len) {
-    res = memcmp(a->buf, b->buf, a->len);
-    return res == 0 ? -1 : res;
-  } else if (a->len > b->len) {
-    res = memcmp(a->buf, b->buf, b->len);
-    return res == 0 ? +1 : res;
-  }
-  return memcmp(a->buf, b->buf, a->len);
-}
-
-bool w_string_equal_cstring(const w_string_t* a, const char* b) {
-  uint32_t blen = strlen_uint32(b);
-  if (a->len != blen)
-    return false;
-  return memcmp(a->buf, b, a->len) == 0 ? true : false;
-}
-
-bool w_string_equal(const w_string_t* a, const w_string_t* b) {
-  if (a == b)
-    return true;
-  if (a == nullptr || b == nullptr)
-    return false;
-  if (a->len != b->len)
-    return false;
-  if (a->hval_computed && b->hval_computed && a->_hval != b->_hval) {
-    return false;
-  }
-  return memcmp(a->buf, b->buf, a->len) == 0 ? true : false;
 }
 
 bool w_string_equal_caseless(w_string_piece a, w_string_piece b) {
@@ -693,6 +615,7 @@ bool w_string_equal_caseless(w_string_piece a, w_string_piece b) {
     return false;
   }
   for (i = 0; i < a.size(); i++) {
+    // TODO: `tolower` depends on locale.
     if (tolower((uint8_t)a[i]) != tolower((uint8_t)b[i])) {
       return false;
     }
@@ -709,37 +632,17 @@ bool w_string_piece::hasSuffix(w_string_piece suffix) const {
 
   base = size() - suffix.size();
 
-  if (s_[base - 1] != '.') {
+  if (str_[base - 1] != '.') {
     return false;
   }
 
   for (i = 0; i < suffix.size(); i++) {
-    if (tolower((uint8_t)s_[base + i]) != suffix[i]) {
+    // TODO: `tolower` depends on locale.
+    if (tolower((uint8_t)str_[base + i]) != suffix[i]) {
       return false;
     }
   }
 
-  return true;
-}
-
-bool w_string_startswith(w_string_t* str, w_string_t* prefix) {
-  if (prefix->len > str->len) {
-    return false;
-  }
-  return memcmp(str->buf, prefix->buf, prefix->len) == 0;
-}
-
-bool w_string_startswith_caseless(w_string_t* str, w_string_t* prefix) {
-  size_t i;
-
-  if (prefix->len > str->len) {
-    return false;
-  }
-  for (i = 0; i < prefix->len; i++) {
-    if (tolower((uint8_t)str->buf[i]) != tolower((uint8_t)prefix->buf[i])) {
-      return false;
-    }
-  }
   return true;
 }
 
@@ -754,36 +657,24 @@ bool w_string_piece::contains(w_string_piece needle) const {
 #endif
 }
 
-w_string_piece w_string_canon_path(w_string_t* str) {
-  int end;
-  int trim = 0;
-
-  for (end = str->len - 1; end >= 0 && is_slash(str->buf[end]); end--) {
-    trim++;
+w_string_piece w_string_canon_path(w_string_piece str) {
+  const char* begin = str.data();
+  const char* end = str.data() + str.size();
+  while (end != begin && is_slash(end[-1])) {
+    --end;
   }
-  if (trim) {
-    return w_string_piece(str->buf, str->len - trim);
-  }
-  return w_string_piece(str);
+  return w_string_piece{begin, end};
 }
 
-bool w_string_is_known_unicode(w_string_t* str) {
-  return str->type == W_STRING_UNICODE;
-}
+bool w_string_path_is_absolute(w_string_piece path) {
+  // TODO: To avoid needing a strlen in call sites that have a null-terminated
+  // `const char*` path, this function could have a `const char*` overload
+  // because it only ever looks at the first few characters of the string.
 
-bool w_string_path_is_absolute(const w_string_t* str) {
-  return w_is_path_absolute_cstr_len(str->buf, str->len);
-}
-
-bool w_is_path_absolute_cstr(const char* path) {
-  return w_is_path_absolute_cstr_len(path, strlen_uint32(path));
-}
-
-bool w_is_path_absolute_cstr_len(const char* path, uint32_t len) {
 #ifdef _WIN32
   char drive_letter;
 
-  if (len <= 2) {
+  if (path.size() <= 2) {
     return false;
   }
 
@@ -794,6 +685,7 @@ bool w_is_path_absolute_cstr_len(const char* path, uint32_t len) {
     return is_slash(path[1]);
   }
 
+  // TODO: `tolower` depends on locale.
   drive_letter = (char)tolower(path[0]);
   // "C:something"
   if (drive_letter >= 'a' && drive_letter <= 'z' && path[1] == ':') {
@@ -807,7 +699,7 @@ bool w_is_path_absolute_cstr_len(const char* path, uint32_t len) {
   // the path is a valid watchable root
   return false;
 #else
-  return len > 0 && path[0] == '/';
+  return path.size() > 0 && path[0] == '/';
 #endif
 }
 

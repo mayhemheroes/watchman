@@ -401,8 +401,7 @@ void InMemoryView::processPath(
     return;
   }
 
-  if (w_string_equal(pending.path, rootPath_) ||
-      (pending.flags & W_PENDING_CRAWL_ONLY)) {
+  if (pending.path == rootPath_ || (pending.flags & W_PENDING_CRAWL_ONLY)) {
     crawler(root, view, coll, pending, pendingCookies);
   } else {
     statPath(*root, root->cookies, view, coll, pending, pre_stat);
@@ -830,10 +829,10 @@ void InMemoryView::statPath(
   }
 
   auto& path = pending.path;
-  w_check(path, "must have path");
+  w_check(!path.empty(), "must have path");
   auto dir_name = pending.path.dirName();
   auto file_name = pending.path.baseName();
-  w_check(dir_name, "must have dir_name");
+  w_check(!dir_name.empty(), "must have dir_name");
   auto parentDir = view.resolveDir(dir_name, true);
 
   auto file = parentDir->getChildFile(file_name);

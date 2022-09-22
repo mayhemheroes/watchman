@@ -51,7 +51,7 @@ struct Query {
   /**
    * Optional full path to relative root, without and with trailing slash.
    */
-  w_string relative_root;
+  std::optional<w_string> relative_root;
   w_string relative_root_slash;
 
   std::optional<std::vector<QueryPath>> paths;
@@ -94,8 +94,8 @@ struct Query {
 
   QueryFieldList fieldList;
 
-  w_string request_id;
-  w_string subscriptionName;
+  std::optional<w_string> request_id;
+  std::optional<w_string> subscriptionName;
   pid_t clientPid{0};
 
   bool alwaysIncludeDirectories{false};
