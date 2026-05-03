@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-serde = { version = "1.0.142", features = ["derive"] }
+serde = { version = "=1.0.192", features = ["derive"] }
 
 [dependencies.serde_bser]
 path = ".."
